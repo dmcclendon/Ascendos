@@ -186,6 +186,7 @@ mkdir "${tmpdir}/rpmbuildhome"
 env HOME="${tmpdir}/rpmbuildhome" \
     rpmdev-setuptree
 
+# reviewer? should the dist be more dynamic here?  e.g. .el6.1 in some case?
 cat <<EOF > "${tmpdir}/rpmbuildhome/.rpmmacros"
 # dist macros.
 %rhel 6
@@ -199,8 +200,17 @@ EOF
 #############################################################################
 status "re-vending tuv stock source packages ..."
 
+# lazy developer hook
+if [ "${X_ELBUILD_GENTDVSRPMREPO_SKIP_STOCK_RPM_REVEND_PHASE}" == "" ]; then
+    # the simple superset list from upstream
+    tuv_srpm_list=$( ls -1A "${tuv_srpm_repo}/"*.src.rpm 2> /dev/null )
+else
+    # user wants to skip and get directly to packages with deltas
+    tuv_srpm_list=""
+fi
+
 ## for each tuv srpm, not in non.in.asc list, rebuild as initial contents
-for srpm in $( ls -1A "${tuv_srpm_repo}/"*.src.rpm ); do
+for srpm in ${tuv_srpm_list}; do
 
     buildit=1
     srpm_filename=$( echo "${srpm}" | sed -e 's/.*\///' )
@@ -271,6 +281,14 @@ for target_pkg_name in $(\
 
     status "processing package with tdv delta: ${target_pkg_name} ..."
 
+    # TODO: integrate this loop inside above loop, preventing the
+    #   need to clean up later.
+
+    # BUG: this just checks against the last version to decide to build.
+    #  really, need TODO something like checking the tuv repo with the *
+    #  expansion to catch all .el6_N.M versions as well as the orig, and
+    #  iterate over each of those deciding if it needs to be built.
+
     buildit=1
     # check to see if it needs building, or if a good build exists already
     latest_version_built=$( \
@@ -296,154 +314,172 @@ for target_pkg_name in $(\
 
         # create and enter a rebuilding workarea/directory
 	pkg_rebuild_dir="${output_tdv_srpm_repo}/${target_pkg_name}.tdv.rebuild"
-	mkdir -p "${pkg_rebuild_dir}"
-	pushd "${pkg_rebuild_dir}" > /dev/null 2>&1
 	
         # extract *TUV* original package if it exists
 
-	# NOTE: consider more whether or not this sketchy(??) logic
-	# (not that bind is modified, but provides a good example)
-	# bind-9.7.3-2.el6_1.P3.2.src.rpm has
-	# Release:  2%{?dist}.%{PATCHVER}.2 is what is in
-	# and I'm pretty sure the dist portion will result in binary
-	# packages by default like- bind-9.7.3-2.el6.1.P3.2*
-	# (i.e. .el6_1 -> .el6.1 )
-	# (todo: check that is how they look from upstream)
-	# in other words, need to seriously consider that, and see if it
-	#   is indicitave of the idea that the packages/deltas dir should
-	#   have the .el6* in it, as there can be multiple, i.e. .el6, .el6_1,
-	#   .el6_2, etc... 
-
-	# but for right now, just do this
-	last_package_filename=$( \
+	# BUG: the head -1 needs to be removed, but is blocked on the
+	#   automatic munging of release.  I.e. the primitive first pass
+	#   patching is too known-brittle.  But good enough prior to the
+	#   6.1 pointrelease.
+	tuv_pkgs=$( \
 	    ls -1A "${tuv_srpm_repo}/${target_pkg_name}.el6"*.src.rpm \
+	    | sort --sort=version \
+	    | head -1 \
 	    2> /dev/null )
 
-        if [ -f "${last_package_filename}" ]; then
+	for tuv_pkg in ${tuv_pkgs}; do
+	    
+	    status "generating modified tdv package: ${tuv_pkg} ..."
 
-	    last_package_basename=$( \
-		basename "${last_package_filename}" .src.rpm )
+	    mkdir -p "${pkg_rebuild_dir}"
 
-	    rpm2cpio "${last_package_filename}" \
-		| cpio --quiet --extract --make-directories \
-		> "${tmpdir}/${progname}.verbose.log" 2>&1
-
-	else
-
-	    # used below to create the destination filename
-	    last_package_basename="${target_pkg_name}.el6"
-
-	fi
-
-	popd > /dev/null 2>&1
-	
-        # now integrate changes from delta directory
-	cp -a "${tdv_delta_repo}/${target_pkg_name}" \
-	    "${output_tdv_srpm_repo}/${target_pkg_name}" 
-	pushd "${output_tdv_srpm_repo}/${target_pkg_name}" > /dev/null 2>&1
-
-        # first pass for special tarball-expanded direcories
-	for dir in $( find . -type d -print ); do
-	    if ( echo "${dir}" | grep -q "\.elbuild_expanded\$" ); then
+	    # check if this is a package in upstream, or downstream only
+            if [ -f "${tuv_pkg}" ]; then
+		# upstream package with delta(dir) present
+		tuv_pkg_basename=$( \
+		    basename "${tuv_pkg}" .src.rpm )
 		
-		target_dir_file=$( echo "${dir}" \
-		    | sed -e 's/\.elbuild_expanded$//' )
-		
-		pushd "${dir}" > /dev/null 2>&1
-		
-		rebuilt_file="${pkg_rebuild_dir}/${target_dir_file}"
-		
-		if ( echo "${target_dir_file}" \
-		    | grep -q "\.tar\.gz\$" ); then
-		    
-		    tar -czpsf "${rebuilt_file}" . 
-		    
-		elif ( echo "${target_dir_file}" \
-		    | grep -q "\.tar\.bz2\$" ); then
-		    
-		    tar -cjpsf "${rebuilt_file}" . 
-		    
-		elif ( echo "${target_dir_file}" \
-		    | grep -q "\.tar$" ); then
-		    
-		    tar -cpsf "${rebuilt_file}" . 
-		fi
+		pushd "${pkg_rebuild_dir}" > /dev/null 2>&1
+		rpm2cpio "${tuv_pkg}" \
+		    | cpio --quiet --extract --make-directories \
+		    > "${tmpdir}/${progname}.verbose.log" 2>&1
 		popd > /dev/null 2>&1
-	    fi
-	done
-    
-#############################################################################
-        # second pass for everything else 
-	for file in $( find . -type f -print ); do
-	    if ( echo "${file}" | grep -q "\.elbuild_patchable\$" ); then
-		# disregard for now
-		true
-	    elif ( echo "${file}" | grep -q "\.elbuild_expanded\/" ); then
-		# disregard, taken care of above
-		true
-	    elif ( echo "${file}" | grep -q "\.elbuild\.patch\$" ); then
-		target_file=$( echo "${file}" | sed -e 's/\.elbuild\.patch$//' )
-		patch --quiet "${pkg_rebuild_dir}/${target_file}" \
-		    "${output_tdv_srpm_repo}/${target_pkg_name}/${file}" 
-	    elif ( echo "${file}" | grep -q "\.elbuild_not_used\$" ); then
-		# this file isn't used by tdv, so remove from rebuild 
-		killfile=$( echo "${file}" | sed -e 's/\.elbuild_not_used$//' )
-		rm -f "${pkg_rebuild_dir}/${killfile}"
 	    else
-		# diff file takes priority, copy over tuv version if present
-		cp "${file}" "${pkg_rebuild_dir}/${file}"
+		# downstream only package defined as a delta(dir)
+		# (e.g. MyDistro-release)
+		tuv_pkg_basename="${target_pkg_name}.el6"
 	    fi
-	done
-    
-	popd > /dev/null 2>&1
-	rm -rf "${output_tdv_srpm_repo}/${target_pkg_name}"
-
-	
+	    
+	    
+            # now integrate changes from delta directory
+	    cp -a "${tdv_delta_repo}/${target_pkg_name}" \
+		"${output_tdv_srpm_repo}/${target_pkg_name}" 
+	    pushd "${output_tdv_srpm_repo}/${target_pkg_name}" > /dev/null 2>&1
+	    
+            # first pass for special tarball-expanded direcories
+	    for dir in $( find . -type d -print ); do
+		if ( echo "${dir}" | grep -q "\.elbuild_expanded\$" ); then
+		    
+		    target_dir_file=$( echo "${dir}" \
+			| sed -e 's/\.elbuild_expanded$//' )
+		    
+		    pushd "${dir}" > /dev/null 2>&1
+		    
+		    rebuilt_file="${pkg_rebuild_dir}/${target_dir_file}"
+		    
+		    if ( echo "${target_dir_file}" \
+			| grep -q "\.tar\.gz\$" ); then
+			
+			tar -czpsf "${rebuilt_file}" . 
+			
+		    elif ( echo "${target_dir_file}" \
+			| grep -q "\.tar\.bz2\$" ); then
+			
+			tar -cjpsf "${rebuilt_file}" . 
+			
+		    elif ( echo "${target_dir_file}" \
+			| grep -q "\.tar$" ); then
+			
+			tar -cpsf "${rebuilt_file}" . 
+		    fi
+		    popd > /dev/null 2>&1
+		fi
+	    done
+	    
 #############################################################################
-        # go about repackaging/vending modified package components
+            # second pass for everything else 
+	    for file in $( find . -type f -print ); do
+		if ( echo "${file}" | grep -q "\.elbuild_patchable\$" ); then
+		    # disregard for now
+		    true
+		elif ( echo "${file}" | grep -q "\.elbuild_expanded\/" ); then
+		    # disregard, taken care of above
+		    true
+		elif ( echo "${file}" | grep -q "\.elbuild\.patch\$" ); then
+		    target_file=$( echo "${file}" | sed -e 's/\.elbuild\.patch$//' )
+		    if ( ! patch \
+			--quiet \
+			"${pkg_rebuild_dir}/${target_file}" \
+			"${output_tdv_srpm_repo}/${target_pkg_name}/${file}" ); then
+			# this would be a die except for the known BUG above
+			status "PATCHING FAILED"
+		    fi
+		elif ( echo "${file}" | grep -q "\.elbuild_not_used\$" ); then
+		    # this file isn't used by tdv, so remove from rebuild 
+		    killfile=$( echo "${file}" | sed -e 's/\.elbuild_not_used$//' )
+		    rm -f "${pkg_rebuild_dir}/${killfile}"
+		else
+		    # diff file takes priority, copy over tuv version if present
+		    cp "${file}" "${pkg_rebuild_dir}/${file}"
+		fi
+	    done
+	    
+	    popd > /dev/null 2>&1
+	    rm -rf "${output_tdv_srpm_repo}/${target_pkg_name}"
+	    
+	    
+#############################################################################
+            # go about repackaging/vending modified package components
 
-	# sources...
-	mv "${pkg_rebuild_dir}/"* \
-	    "${tmpdir}/rpmbuildhome/rpmbuild/SOURCES/"
+	    # sources...
+	    mv "${pkg_rebuild_dir}/"* \
+		"${tmpdir}/rpmbuildhome/rpmbuild/SOURCES/"
 	
-	# ... plus spec ...
-	mv "${tmpdir}/rpmbuildhome/rpmbuild/SOURCES/"*.spec \
-	    "${tmpdir}/rpmbuildhome/rpmbuild/SPECS/"
+	    # ... plus spec ...
+	    mv "${tmpdir}/rpmbuildhome/rpmbuild/SOURCES/"*.spec \
+		"${tmpdir}/rpmbuildhome/rpmbuild/SPECS/"
 	
-	# ... get processesed into ...
-	env HOME="${tmpdir}/rpmbuildhome" \
-	    rpmbuild \
-	    -bs \
-	    --rmspec \
-	    --rmsource \
-	    "${tmpdir}/rpmbuildhome/rpmbuild/SPECS/"*.spec \
-	    > "${tmpdir}/${progname}.verbose.log" 2>&1
+	    # ... get processesed into ...
+	    env HOME="${tmpdir}/rpmbuildhome" \
+		rpmbuild \
+		-bs \
+		--rmspec \
+		--rmsource \
+		"${tmpdir}/rpmbuildhome/rpmbuild/SPECS/"*.spec 
 
-	# todo: review this when not tired/intoxicated, will get 
-	#   rewritten anyway while tending to above TODOs
-	pkg_name=$( \
-	    basename \
-	    "${tmpdir}/rpmbuildhome/rpmbuild/SRPMS/"*.src.rpm \
-	    .src.rpm )
-	showvar pkg_name
-	num_suffix=$( \
-	    echo "${pkg_name}" \
-	    | sed -e 's/^.*\(\.[0-9]\+\)$/\1/' )
-	showvar num_suffix
+#		> "${tmpdir}/${progname}.verbose.log" 2>&1
+	    
+	    # todo: review this when not tired/intoxicated, will get 
+	    #   rewritten anyway while tending to above TODOs
 
-	if [ "${num_suffix}" == "${pkg_name}" ]; then
-	    num_suffix=""
-	fi
+	    new_pkg_filename=$( \
+		ls -1A "${tmpdir}/rpmbuildhome/rpmbuild/SRPMS/"*.src.rpm )
 
-	new_srpm_filename="${last_package_basename}.asc${num_suffix}.src.rpm"
+	    # assertion
+	    if [ ! -f "${new_pkg_filename}" ]; then
+		die "assertion failed, there should have been" \
+		    "exactly one package: ${new_pkg_filename} ..."
+	    fi
 
-	# resulting package that gets staged
-	mv -v "${tmpdir}/rpmbuildhome/rpmbuild/SRPMS/"*.src.rpm \
-	    "${output_tdv_srpm_repo}/${new_srpm_filename}"
+	    if ( ! echo "${new_pkg_filename}" | grep -q "\.asc" ); then
+		num_suffix=""
+	    else
+		pkg_name=$( \
+		    basename \
+		    "${tmpdir}/rpmbuildhome/rpmbuild/SRPMS/"*.src.rpm \
+		    .src.rpm )
+		showvar pkg_name
+		num_suffix=$( \
+		    echo "${pkg_name}" \
+		    | sed -e 's/^.*\(\.[0-9]\+\)$/\1/' )
+		showvar num_suffix
+	    fi
 
-	# clean up the rebuild workarea
-	rm -rf "${pkg_rebuild_dir}"
-	
+	    if [ "${num_suffix}" == "${pkg_name}" ]; then
+		num_suffix=""
+	    fi
+	    
+	    new_srpm_filename="${tuv_pkg_basename}.asc${num_suffix}.src.rpm"
+	    
+	    # resulting package that gets staged
+	    mv -v "${tmpdir}/rpmbuildhome/rpmbuild/SRPMS/"*.src.rpm \
+		"${output_tdv_srpm_repo}/${new_srpm_filename}"
+	    
+	    # clean up the rebuild workarea
+	    rm -rf "${pkg_rebuild_dir}"
+	    
+	done
+	# end iteration of matching tuv pkgs 
     fi
     # end if(buildit)
 done
@@ -480,9 +516,8 @@ rm -rf "${tmpdir}"
 debug "goodbye..."
 
 
+#############################################################################
 ### end script, only notes below...
-#############################################################################
-#############################################################################
 #############################################################################
 #
 # ...
