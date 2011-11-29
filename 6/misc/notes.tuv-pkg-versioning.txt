@@ -1,0 +1,18 @@
+( first pass notes )
+
+example1:
+
+httpd-2.2.15-9.el6.src.rpm
+httpd-2.2.15-9.el6_1.2.src.rpm 
+httpd-2.2.15-9.el6_1.3.src.rpm
+
+example 2:
+
+bind-9.7.3-2.el6_1.P3.2.src.rpm has
+Release:  2%{?dist}.%{PATCHVER}.2 is what is in
+
+--------------
+
+dmc: my understanding: call the 9 in the -9.el6 above the 'release major (int)" number.  would be 2 in bind in the second example.  Whenever a package in the 6x series bumps the release major, it enters as a .el6.src.rpm.  Thence onward if an update comes out with a bumped release major, or bumped version (2.2.15/9.7.3 above), same thing, .el6.  But if an update comes out that doesn't justify a bumped release major, it gets _N.UPDV.src.rpm.  Where N corresponds to what the most recent point released was (e.g. 2 if 6.2 is the most recent point release prior to the hypothetical package).  And the optional UPDV which could be incrementing integers (perhaps noncontiguous), or incrementing strings (P for 'patchlevel' (core tuv pkgs? bind special?) or whatever).
+
+At first sight I guessed that updates era categorization/classification could be inferred by the suffix after .el6, but I don't think that is the case, hence the current logic in gen-big-board (and subscripts).

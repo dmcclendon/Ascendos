@@ -7,28 +7,26 @@ Douglas McClendon's misc Ascendos/DescendOS notes
 current activities
 ==================
 
-done: added list of information taps to wiki, which are becoming
-      better sources of information than this file
+done: added list of information taps to ascendos.org/wiki/Development,
+  which are much better general sources of information than this file.
 
-first alpha
------------
-rc's are in the pipeline from el-build, now even with inital live spin.
-Presently seeking better consensus and documentation on mirror/output
-layout.  Issue being pursued on -dev,wiki,bugzilla.  Note, being so
-close to 6.1 package completeness, that is now a blocker for the next
-real alpha rc.
+
+first announced alpha
+---------------------
+first 6.1 alpha seems likely to be ready in the coming week, give or
+take.  stage still needs to understand pluggable mirror layout options
+rather than hardcoding the silly confused dev layout currently in use.
+(but it hasn't been that hard to work around in automation, so I'm 
+still aiming for an intermediary milestone of being able to reproduce
+it as is from automation and koji input, and at that point, which 
+seems near enough, I'll move on to the several alternate layout 
+options (to the automation/stage-script)
+
 
 upcoming beta tasks
 -------------------
-need to handle the 6.0 package off-spec release naming issues, and the 
-~200? 6.1 packages that need being built.  The 2 oldest unbuilt packages
-(grub and qt) have been built.  The next batches require some abbreviated
-manual steps (for the .asc ones), along with leveraging present gen-tdv
-automation.  And several require dispatch logic that should simultaenously
-be encoded into v-bake or preferably newly factored subcommand.  Beyond
-that, everything may just build, with the dozen(?) or so of the remaining
-updates that require the semi-manual import (to be automated, e.g. the
-quintessential httpd default test page branding example.
+need to handle the existing package off-spec release naming issues, and the 
+~200? 6.1 updates packages that need being built.
 
 
 build3
@@ -64,17 +62,10 @@ need to start documenting candidate mainenance workflows, preferably with dia
 
 build.a.o/linux/ascendos
 ------------------------
+getting pretty close to being completely reproducible with a single
+script invocation.  And updates are slowly beginning to churn through
+the pipeline, so leaving the documentation of that to the koji logs.
 
-2011-10-05: added /GPG/RPM-GPG-KEY-ascendos-alpha-dmc
-2011-10-05: repochange: added zsh, libxml2, perl-Sys-Virt, and XXXXXX-logos(containing our branding) to 6.0/SRPMS/ 
-
-- koji: new ascendos-release
-- koji: new X-logos
-- koji: new zsh (related to above, in see bz#...)
-
--------------
-
-2011-10-26: removed off-off-spec obsoleted
 
 misc todo
 ---------
