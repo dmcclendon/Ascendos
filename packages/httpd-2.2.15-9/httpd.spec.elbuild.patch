@@ -1,0 +1,18 @@
+--- httpd-2.2.15-9.orig/httpd.spec	2011-11-23 22:48:06.000000000 -0600
++++ httpd-2.2.15-9/httpd.spec	2011-11-23 23:41:29.000000000 -0600
+@@ -1,13 +1,13 @@
+ %define contentdir /var/www
+ %define suexec_caller apache
+ %define mmn 20051115
+-%define vstring Red Hat
++%define vstring Ascendos
+ %define mpms worker event
+ 
+ Summary: Apache HTTP Server
+ Name: httpd
+ Version: 2.2.15
+-Release: 9%{?dist}
++Release: 9%{?dist}.asc
+ URL: http://httpd.apache.org/
+ Source0: http://www.apache.org/dist/httpd/httpd-%{version}.tar.gz
+ Source1: index.html
