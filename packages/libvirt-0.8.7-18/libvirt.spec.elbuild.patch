@@ -1,0 +1,40 @@
+--- libvirt.spec.orig	2011-04-18 09:25:41.000000000 -0500
++++ libvirt.spec	2011-11-27 23:29:45.000000000 -0600
+@@ -204,7 +204,7 @@
+ Summary: Library providing a simple virtualization API
+ Name: libvirt
+ Version: 0.8.7
+-Release: 18%{?dist}%{?extra_release}
++Release: 18%{?dist}%{?extra_release}.asc
+ License: LGPLv2+
+ Group: Development/Libraries
+ Source: http://libvirt.org/sources/libvirt-%{version}.tar.gz
+@@ -436,6 +436,9 @@
+ Patch224: libvirt-tests-Unit-tests-for-internal-hash-APIs.patch
+ Patch225: libvirt-Experimental-libvirtd-upstart-job.patch
+ 
++%global _default_patch_fuzz 1
++Patch500: libvirt-rh_bz_732931-f0e9dfeca967d05f23409c838619d9357d4f7d7f.patch
++
+ BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
+ URL: http://libvirt.org/
+ BuildRequires: python-devel
+@@ -931,6 +934,8 @@
+ %patch224 -p1
+ %patch225 -p1
+ 
++%patch500 -p1
++
+ chmod 0755 tests/virsh-optparse
+ 
+ %build
+@@ -1492,6 +1497,9 @@
+ %endif
+ 
+ %changelog
++* Mon Nov 28 2011 Douglas McClendon <dmc@ascendos.org> - 0.8.7-18.el6.asc
++- fix build w/mock: backport ...4f7d7f (rhbz#732931)
++
+ * Mon Apr 18 2011 Jiri Denemark <jdenemar@redhat.com> - 0.8.7-18.el6
+ - network: Fix NULL dereference during error recovery (rhbz#696660)
+ - virsh: Fix regression in parsing optional integer (rhbz#693963)
