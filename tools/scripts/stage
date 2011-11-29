@@ -99,19 +99,16 @@ dist_test_def="alpha"
 # todo: get repochart to have tdv-only packages included in it
 repochart_def="${x_bake_cachedir}/tuv.srpms.repochart.txt"
 
-# to enable debug messages if desired
-x_debug=1
-
-# to suppress status messages if desired
-x_quiet=0
-
 # a fairly sane value
 max_pointrelease=31
 
 ## derived values
 
-# identifier for tmp filenames
-tmp_orig_str="orig-${progname}"
+# to enable debug messages if desired
+x_debug=1
+
+# to suppress status messages if desired
+x_quiet=0
 
 
 #############################################################################
@@ -135,6 +132,37 @@ function usage {
     echo ""
     echo ""
     exit 1
+}
+
+
+function workaround_pkg_name {
+    new_name="${1}"
+
+
+    if [ "${new_name}" == "guile-1.8.7-4.el6" ]; then
+	new_name="guile-1.8.7-4.el6.0.asc"
+    fi
+
+    if [ "${new_name}" == "zsh-4.3.10-4.1.el6" ]; then
+	new_name="zsh-4.3.10-4.1.el6.asc"
+    fi
+
+    dist_prefix=$( echo "${new_name}" | sed -e 's/\.el6.*$//' )
+
+    actual_build=$( koji search build ${new_name} )
+
+    if [ "${new_name}" != "${actual_build}" ]; then
+	candidate=$( \
+	    koji search build "${dist_prefix}"* \
+	    | grep -v "\.ascendos6" \
+	    | sort --sort=version \
+	    | tail -1 )
+	if ( koji buildinfo "${candidate}" | grep -q "State: COMPLETE" ); then
+	    new_name="${candidate}"
+	fi
+    fi
+
+    echo "${new_name}"
 }
 
 
@@ -193,6 +221,9 @@ done
 staging_dir="${build_area}/pkg-staging"
 secret_dir="${build_area}/.keys-${signing_user}"
 
+# identifier for tmp filenames
+tmp_orig_str="orig-${progname}"
+
 
 #############################################################################
 status "fiddling with keys ..."
@@ -215,7 +246,7 @@ if [ "${signing_user}" != "none" ]; then
     
     # TODO: use GNUPGHOME 
     cp -a "${secret_dir}" "${HOME}/.gnupg"
-    # TODO: use ?how do I easily override ~/.rpmmacros?
+    # TODO: use env HOME=
     cp -a "${secret_dir}.rpmmacros" "${HOME}/.rpmmacros"
 
 fi
@@ -237,17 +268,18 @@ for package in ${pkg_list}; do
     # this supports either input as a .src.rpm name or a package/ver name
     pkg_name=$( echo "$( basename ${package} )" | sed -e 's/\.src\.rpm//' )
 
-    # TODO: check to see if pkg is in bao/linux/ascendos/everything 
-    #   in which case, abort and make the user override this process that
-    #   would replace an already signed specific pkg-nvr with different bits
+    # WORKAROUND for off-spec pkg_name(s)
+    pkg_name=$( workaround_pkg_name "${pkg_name}" )
 
     status "pulling package from build system: ${pkg_name} ..."
 
     if [ -d "${staging_dir}/${pkg_name}" ]; then
 	die "staging directory already exists, aborting."
     else
-	# todo: error check...
-	mkdir "${staging_dir}/${pkg_name}"
+	if ( ! mkdir "${staging_dir}/${pkg_name}" ); then
+	    die "could not create staging/package directory :" \
+		"${staging_dir}/${pkg_name}"
+	fi
     fi
 
     pushd "${staging_dir}/${pkg_name}" 2>&1 > /dev/null
@@ -263,22 +295,48 @@ for package in ${pkg_list}; do
 	${pkg_name}
     koji_retval=$?
     if (( $koji_retval )); then
-	die "could not koji download the package"
+	# TODO: revert this back to error/die
+	status "could not koji download the package: ${pkg_name} ..."
     fi
-    
+
     new_packages=$( ls -1A *.rpm )
     for package in ${new_packages}; do
-	packages_to_sign_list="\
+	# if desired, prefer existing published signed packages
+	if [ "${x_dev_staging_restage_sources}" != "" ]; then
+	    # note: this doesn't allow spaces in paths for _sources
+	    foundrpm=$( \
+		find \
+		${x_dev_staging_restage_sources} \
+		-name "${package}" \
+		-print )
+
+	    if [ -f "${foundrpm}" ]; then
+		debug "utilizing published rpm: ${foundrpm} ..."
+		# replace the one from koji with the existing published version
+		rm -f "./${package}"
+		ln "${foundrpm}" "./${package}"
+		# TODO: validate/ensure existing package/signature
+	    else
+		debug "no published rpm found for: ${package} ..."
+		packages_to_sign_list="\
 ${packages_to_sign_list} ${staging_dir}/${pkg_name}/${package}"
+	    fi
+
+	else
+	    packages_to_sign_list="\
+${packages_to_sign_list} ${staging_dir}/${pkg_name}/${package}"
+	fi
     done
 
     popd 2>&1 > /dev/null
 done
     
 if [ "${signing_user}" != "none" ]; then
-    status "signing packages..."
-    if ( ! rpm --addsign ${packages_to_sign_list} ); then
-	die "package signing failed"
+    status "signing packages: ${packages_to_sign_list} ..."
+    if ( ! echo "${packages_to_sign_list}" | grep '^\s*$' ); then
+	if ( ! rpm --addsign ${packages_to_sign_list} ); then
+	    die "package signing failed"
+	fi
     fi
 else
     status "NOT signing packages..."
@@ -290,6 +348,11 @@ status "staging freshly pulled/signed packages ..."
 for package in ${pkg_list}; do
     status "processing package: staging: ${package} ..."
 
+    pkg_name=$( echo "$( basename ${package} )" | sed -e 's/\.src\.rpm//' )
+
+    # WORKAROUND for off-spec pkg_name(s)
+    pkg_name=$( workaround_pkg_name "${pkg_name}" )
+
     # get upstream package name if this is a modified version
     upstream_package_name="${package}"
     # I guess this is reasonable as '.' can't be part of a package name(?)
@@ -299,34 +362,42 @@ for package in ${pkg_list}; do
 	    | sed -e 's/\.asc.*$//' )
     fi
 
-    pushd "${staging_dir}/${pkg_name}" 2>&1 > /dev/null
+#    pushd "${staging_dir}/${pkg_name}" 2>&1 > /dev/null
+    pushd "${staging_dir}/${pkg_name}"
 
     ## initial values / global placements
 
     # note: existing structure leaves src out of everything.  good reasons??
     src_rpm_homes="\
+${x_dev_staging_root}/union
 ${x_dev_staging_root}/SRPMS
 "
     noarch_rpm_homes="\
+${x_dev_staging_root}/union
 ${x_dev_staging_root}/everything
 "
     x32_rpm_homes="\
+${x_dev_staging_root}/union
 ${x_dev_staging_root}/everything
 "
     x64_rpm_homes="\
+${x_dev_staging_root}/union
 ${x_dev_staging_root}/everything
 "
     noarch_debuginfo_rpm_homes="\
-${x_dev_staging_root}/debuginfo
+${x_dev_staging_root}/union
 ${x_dev_staging_root}/everything
+${x_dev_staging_root}/debuginfo
 "
     x32_debuginfo_rpm_homes="\
-${x_dev_staging_root}/debuginfo
+${x_dev_staging_root}/union
 ${x_dev_staging_root}/everything
+${x_dev_staging_root}/debuginfo
 "
     x64_debuginfo_rpm_homes="\
-${x_dev_staging_root}/debuginfo
+${x_dev_staging_root}/union
 ${x_dev_staging_root}/everything
+${x_dev_staging_root}/debuginfo
 "
 
 
@@ -349,22 +420,22 @@ ${x_dev_staging_root}/everything
 
             # .0 is presently odd
 	    case "${pr}" in
-		0)
-		    noarch_rpm_homes="\
-${noarch_rpm_homes}
-${x_dev_staging_root}/${dist_version_major}.${pr}/os/i386/Packages
-${x_dev_staging_root}/${dist_version_major}.${pr}/os/x86_64/Packages
-"
-		    x32_rpm_homes="\
-${x32_rpm_homes}
-${x_dev_staging_root}/${dist_version_major}.${pr}/os/i386/Packages
-${x_dev_staging_root}/${dist_version_major}.${pr}/os/x86_64/Packages
-"
-		    x64_rpm_homes="\
-${x64_rpm_homes}
-${x_dev_staging_root}/${dist_version_major}.${pr}/os/x86_64/Packages
-"
-		    ;;
+#		0)
+#		    noarch_rpm_homes="\
+#${noarch_rpm_homes}
+#${x_dev_staging_root}/${dist_version_major}.${pr}/os/i386/Packages
+#${x_dev_staging_root}/${dist_version_major}.${pr}/os/x86_64/Packages
+#"
+#		    x32_rpm_homes="\
+#${x32_rpm_homes}
+#${x_dev_staging_root}/${dist_version_major}.${pr}/os/i386/Packages
+#${x_dev_staging_root}/${dist_version_major}.${pr}/os/x86_64/Packages
+#"
+#		    x64_rpm_homes="\
+#${x64_rpm_homes}
+#${x_dev_staging_root}/${dist_version_major}.${pr}/os/x86_64/Packages
+#"
+#		    ;;
 		*)
 		    noarch_rpm_homes="\
 ${noarch_rpm_homes}
@@ -392,22 +463,22 @@ ${x_dev_staging_root}/${dist_version_major}.${pr}/x86_64/os/Packages
 
 	    case "${pr}" in
 		# .0 is presently odd
-		0)
-		    noarch_rpm_homes="\
-${noarch_rpm_homes}
-${x_dev_staging_root}/${dist_version_major}.${pr}/updates/i386
-${x_dev_staging_root}/${dist_version_major}.${pr}/updates/x86_64
-"
-		    x32_rpm_homes="\
-${x32_rpm_homes}
-${x_dev_staging_root}/${dist_version_major}.${pr}/updates/i386
-${x_dev_staging_root}/${dist_version_major}.${pr}/updates/x86_64
-"
-		    x64_rpm_homes="\
-${x64_rpm_homes}
-${x_dev_staging_root}/${dist_version_major}.${pr}/updates/x86_64
-"
-                    ;;
+#		0)
+#		    noarch_rpm_homes="\
+#${noarch_rpm_homes}
+#${x_dev_staging_root}/${dist_version_major}.${pr}/updates/i386
+#${x_dev_staging_root}/${dist_version_major}.${pr}/updates/x86_64
+#"
+#		    x32_rpm_homes="\
+#${x32_rpm_homes}
+#${x_dev_staging_root}/${dist_version_major}.${pr}/updates/i386
+#${x_dev_staging_root}/${dist_version_major}.${pr}/updates/x86_64
+#"
+#		    x64_rpm_homes="\
+#${x64_rpm_homes}
+#${x_dev_staging_root}/${dist_version_major}.${pr}/updates/x86_64
+#"
+#                    ;;
 
 		*)
 		    noarch_rpm_homes="\
@@ -433,12 +504,14 @@ ${x_dev_staging_root}/${dist_version_major}.${pr}/x86_64/updates
     done
     # end iteration over point releases checking the repochart for destinations
 
-    # TODO: add option to use hardlinks for all multiple placements
     for rpm in $( ls -1A *.src.rpm 2> /dev/null ); do
 	status "processing src_rpm: ${rpm}"
 	for newhome in ${src_rpm_homes}; do
-	    if [ ! -d "${newhome}" ]; then die "destination home ${newhome} is not a directory"; fi
-	    cp -v "${rpm}" "${newhome}/${rpm}"
+	    if ( ! mkdir -p "${newhome}" ); then
+		die "could not ensure target repo exists: ${newhome}"
+	    fi
+	    debug ln "${rpm}" "${newhome}/${rpm}"
+	    ln "${rpm}" "${newhome}/${rpm}"
 	done
     done
 
@@ -447,14 +520,20 @@ ${x_dev_staging_root}/${dist_version_major}.${pr}/x86_64/updates
 	if ( echo "${rpm}" | grep -q debuginfo ); then
 	    status "processing noarch_debuginfo_rpm: ${rpm}"
 	    for newhome in ${noarch_debuginfo_rpm_homes}; do
-		if [ ! -d "${newhome}" ]; then die "destination home ${newhome} is not a directory"; fi
-		cp -v "${rpm}" "${newhome}/${rpm}"
+		if ( ! mkdir -p "${newhome}" ); then
+		    die "could not ensure target repo exists: ${newhome}"
+		fi
+		debug ln "${rpm}" "${newhome}/${rpm}"
+		ln "${rpm}" "${newhome}/${rpm}"
 	    done
 	else
 	    status "processing noarch_rpm: ${rpm}"
 	    for newhome in ${noarch_rpm_homes}; do
-		if [ ! -d "${newhome}" ]; then die "destination home ${newhome} is not a directory"; fi
-		cp -v "${rpm}" "${newhome}/${rpm}"
+		if ( ! mkdir -p "${newhome}" ); then
+		    die "could not ensure target repo exists: ${newhome}"
+		fi
+		debug ln "${rpm}" "${newhome}/${rpm}"
+		ln "${rpm}" "${newhome}/${rpm}"
 	    done
 	fi
     done
@@ -462,14 +541,20 @@ ${x_dev_staging_root}/${dist_version_major}.${pr}/x86_64/updates
 	if ( echo "${rpm}" | grep -q debuginfo ); then
 	    status "processing x32_debuginfo_rpm: ${rpm}"
 	    for newhome in ${x32_debuginfo_rpm_homes}; do
-		if [ ! -d "${newhome}" ]; then die "destination home ${newhome} is not a directory"; fi
-		cp -v "${rpm}" "${newhome}/${rpm}"
+		if ( ! mkdir -p "${newhome}" ); then
+		    die "could not ensure target repo exists: ${newhome}"
+		fi
+		debug ln "${rpm}" "${newhome}/${rpm}"
+		ln "${rpm}" "${newhome}/${rpm}"
 	    done
 	else
 	    status "processing x32_rpm: ${rpm}"
 	    for newhome in ${x32_rpm_homes}; do
-		if [ ! -d "${newhome}" ]; then die "destination home ${newhome} is not a directory"; fi
-		cp -v "${rpm}" "${newhome}/${rpm}"
+		if ( ! mkdir -p "${newhome}" ); then
+		    die "could not ensure target repo exists: ${newhome}"
+		fi
+		debug ln "${rpm}" "${newhome}/${rpm}"
+		ln "${rpm}" "${newhome}/${rpm}"
 	    done
 	fi
     done
@@ -477,18 +562,26 @@ ${x_dev_staging_root}/${dist_version_major}.${pr}/x86_64/updates
 	if ( echo "${rpm}" | grep -q debuginfo ); then
 	    status "processing x64-debuginfo-rpm: ${rpm}"
 	    for newhome in ${x64_debuginfo_rpm_homes}; do
-		if [ ! -d "${newhome}" ]; then die "destination home ${newhome} is not a directory"; fi
-		cp -v "${rpm}" "${newhome}/${rpm}"
+		if ( ! mkdir -p "${newhome}" ); then
+		    die "could not ensure target repo exists: ${newhome}"
+		fi
+		debug ln "${rpm}" "${newhome}/${rpm}"
+		ln "${rpm}" "${newhome}/${rpm}"
 	    done
 	else
 	    status "processing x64-rpm: ${rpm}"
 	    for newhome in ${x64_rpm_homes}; do
-		if [ ! -d "${newhome}" ]; then die "destination home ${newhome} is not a directory"; fi
-		cp -v "${rpm}" "${newhome}/${rpm}"
+		if ( ! mkdir -p "${newhome}" ); then
+		    die "could not ensure target repo exists: ${newhome}"
+		fi
+		debug ln "${rpm}" "${newhome}/${rpm}"
+		ln "${rpm}" "${newhome}/${rpm}"
 	    done
 	fi
     done
-    popd 2>&1 > /dev/null
+    popd
+#    popd 2>&1 > /dev/null
+    # leave pkg dir
 done
 
 ## clean up and return things to order
@@ -510,30 +603,51 @@ fi
 
 pushd "${x_dev_staging_root}" 2>&1 > /dev/null
 
+createrepo -d --update union
 createrepo -d --update SRPMS
 createrepo -d --update everything
 createrepo -d --update debuginfo
 
 # NOTE: the current development external ascendos layout seems very confused (6.0/os/arch vs 6.1/arch/os)
-pushd "${dist_version_major}.0/os/i386" 2>&1 > /dev/null
-createrepo -d --update -g repodata/comps-asc6-i386.xml .
-popd 2>&1 > /dev/null
-pushd "${dist_version_major}.0/os/x86_64" 2>&1 > /dev/null
-createrepo -d --update -g repodata/comps-asc6-x86_64.xml .
-popd 2>&1 > /dev/null
+#pushd "${dist_version_major}.0/os/i386" 2>&1 > /dev/null
+#createrepo -d --update -g repodata/comps-asc6-i386.xml .
+#popd 2>&1 > /dev/null
+#pushd "${dist_version_major}.0/os/x86_64" 2>&1 > /dev/null
+#createrepo -d --update -g repodata/comps-asc6-x86_64.xml .
+#popd 2>&1 > /dev/null
+#
+#createrepo -d --update "${dist_version_major}.0/updates/i386"
+#createrepo -d --update "${dist_version_major}.0/updates/x86_64" 
+#
+#pushd "${dist_version_major}.1/i386/os" 2>&1 > /dev/null
+#createrepo -d --update -g repodata/comps-asc6-i386.xml .
+#popd 2>&1 > /dev/null
+#pushd "${dist_version_major}.1/x86_64/os" 2>&1 > /dev/null
+#createrepo -d --update -g repodata/comps-asc6-x86_64.xml .
+#popd 2>&1 > /dev/null
 
-createrepo -d --update "${dist_version_major}.0/updates/i386"
-createrepo -d --update "${dist_version_major}.0/updates/x86_64" 
-
-pushd "${dist_version_major}.1/i386/os" 2>&1 > /dev/null
-createrepo -d --update -g repodata/comps-asc6-i386.xml .
-popd 2>&1 > /dev/null
-pushd "${dist_version_major}.1/x86_64/os" 2>&1 > /dev/null
-createrepo -d --update -g repodata/comps-asc6-x86_64.xml .
-popd 2>&1 > /dev/null
-
-createrepo -d --update "${dist_version_major}.1/i386/updates"
-createrepo -d --update "${dist_version_major}.1/x86_64/updates" 
+for (( i=0 ; ${i} < 31 ; i=$(( ${i} + 1 )) )); do 
+    if [ -d "${dist_version_major}.${i}/x86_64/os" ]; then
+	pushd "${dist_version_major}.${i}/x86_64/os" 2>&1 > /dev/null
+	createrepo -d --update -g repodata/comps-asc6-i386.xml .
+	popd 2>&1 > /dev/null
+    fi
+    if [ -d "${dist_version_major}.${i}/x86_64/updates" ]; then
+	pushd "${dist_version_major}.${i}/x86_64/updates" 2>&1 > /dev/null
+	createrepo -d --update .
+	popd 2>&1 > /dev/null
+    fi
+    if [ -d "${dist_version_major}.${i}/i386/os" ]; then
+	pushd "${dist_version_major}.${i}/i386/os" 2>&1 > /dev/null
+	createrepo -d --update -g repodata/comps-asc6-i386.xml .
+	popd 2>&1 > /dev/null
+    fi
+    if [ -d "${dist_version_major}.${i}/i386/updates" ]; then
+	pushd "${dist_version_major}.${i}/i386/updates" 2>&1 > /dev/null
+	createrepo -d --update .
+	popd 2>&1 > /dev/null
+    fi
+done
 
 popd 2>&1 > /dev/null
 # leave ${x_dev_staging_root}
