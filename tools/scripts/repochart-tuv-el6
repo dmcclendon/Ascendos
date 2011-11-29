@@ -93,8 +93,45 @@ fi
 ## constant and option default definitions
 ##
 
+##
+## from tuv and/or wikipedia: the tuv pointrelease dates
+##
+#
+# tuv-6.0 released 2010/11/10
+#  - actual threshold gleamed from sources:
+#    - (01285176517/Wed 22 Sep 2010 12:28:37 PM CDT)
+#      - python-crypto package, subsequent is 6.0 updates
+#       - reviewer? verify?
+#
+# tuv-6.1 released 2011/05/19
+#  - actual threshold gleamed from sources:
+#    - (01305056350/Tue 10 May 2011 02:39:10 PM CDT)
+#      - kernel package, subsequent is 6.1 updates
+#       - reviewer? verify?
+#
+# NOTE: this list was created manually by inspecting the datesorted
+#   package list.  If someone can automatically generate this
+#   from data in defined/predicatable places on the internet, in
+#   such a way that such future manual maintenance is not
+#   necessary it would be welcomed.
+
+releases_and_temporal_thresholds="\
+6.0:01285176517
+6.1:01305056350
+6.FAKE_END:07777777777
+"
+
+# conservative means to hold updates with an increase in version 
+# or the first component (up to '.') of release, within a pointrelease's
+# updates stream/repo.
+#
+# TODO: implement a whitelists(and/or blacklists?) for mixed cases
+#
+x_update_policy="liberal"
+#x_update_policy="conservative"
+
 # to enable debug messages if desired
-x_debug=0
+x_debug=1
 
 # to suppress status messages if desired
 x_quiet=0
@@ -124,6 +161,9 @@ function usage {
 
 status "initializing..."
 
+#############################################################################
+# parse command line
+
 if [ $# -eq 0 ]; then 
     input=$( readlink -e "${x_cached_datesorted_list_filename}" )
     output=$( readlink -f "${x_cached_repochart_text_filename}" )
@@ -137,17 +177,21 @@ else
     usage
 fi
 
+#############################################################################
+# validate options
+
 if [ ! -f "${input}" ]; then
     die "input data file ${1} does not exist"
 fi
 
 
 if [ -f "${output}" ]; then
-#    die "output ${output} already exists"
+
     # check to see if output is likely to change
     newerfile=$( find \
 	"${output}" \
 	-newer "${input}" )
+
     if [ "${newerfile}" == "${output}" ]; then
 	# don't bother generating a new chart if the input hasn't
 	# been updated since the last output generated.
@@ -161,44 +205,37 @@ if [ -f "${output}" ]; then
 fi
 
 
+#############################################################################
+# initialize processing state
+
 tmpdir=$( setup_tmpdir )
 
 mkdir "${tmpdir}/chart_db"
 
-##
-## from tuv and/or wikipedia: the tuv pointrelease dates
-##
-#
-# tuv-6.0 released 2010/11/10
-#  - actual threshold gleamed from sources:
-#    - (01285176517/Wed 22 Sep 2010 12:28:37 PM CDT)
-#      - python-crypto package, subsequent is 6.0 updates
-#
-# tuv-6.1 released 2011/05/19
-#  - actual threshold gleamed from sources:
-#    - (01305056350/Tue 10 May 2011 02:39:10 PM CDT)
-#      - kernel package, subsequent is 6.1 updates
-#
-# NOTE: this list was created manually by inspecting the datesorted
-#       package list.  If someone can brilliantly autogenerate this
-#       from data on the internet, in such a way that such future 
-#       manual maintenance is not necessary...  I'll be impressed.
+## initialize array of point releases along with their temporal thresholds
 
-releases_and_temporal_thresholds="\
-6.0:01285176517
-6.1:01305056350
-6.FAKE_END:07777777777
-"
-
-# initialize array of point releases along with their temporal thresholds
 num_releases=0
+
 for release in ${releases_and_temporal_thresholds}; do
-    release_version[${num_releases}]=$( echo "${release}" | sed -e 's/:.*//' )
-    release_threshold[${num_releases}]=$( echo "${release}" | sed -e 's/.*:0*//' )
+
+    release_version[${num_releases}]=$( \
+	echo "${release}" \
+	| sed -e 's/:.*//' )
+
+    release_threshold[${num_releases}]=$( \
+	echo "${release}" \
+	| sed -e 's/.*:0*//' )
+
     num_releases=$(( ${num_releases} + 1 ))
+
 done
+
 # compensate for the final .FAKE_END release
 num_releases=$(( ${num_releases} - 1 ))
+
+
+#############################################################################
+# iteration over packages: calculating final repos each package should go to
 
 # start with the first release, and increment this value every time
 # a threshold is hit
@@ -206,32 +243,110 @@ current_release_index=0
 # and then also add the prior current release to this list of prior releases
 prior_releases=""
 while read line; do
-    pkg_nvr=$( echo "${line}" | awk -F'|' '{print $2}' | sed -e 's/^\s*//' -e 's/\s*$//' )
-    pkg_nv=$( echo "${pkg_nvr}" | sed -e 's/-[^-]*$//' )
-    pkg_n=$( echo "${pkg_nv}" | sed -e 's/-[^-]*$//' )
-    pkg_time_date=$( echo "${line}" | awk -F'|' '{print $3}' | sed -e 's/^\s*//' -e 's/\s*$//' )
+    debug "calculating: line: ${line} ..."
+
+    pkg_nvr=$( \
+	echo "${line}" \
+	| awk -F'|' '{print $2}' \
+	| sed -e 's/^\s*//' -e 's/\s*$//' )
+
+    pkg_nv=$( \
+	echo "${pkg_nvr}" \
+	| sed -e 's/-[^-]*$//' )
+
+    pkg_n=$( \
+	echo "${pkg_nv}" \
+	| sed -e 's/-[^-]*$//' )
+
+    pkg_time_date=$( \
+	echo "${line}" \
+	| awk -F'|' '{print $3}' \
+	| sed -e 's/^\s*//' -e 's/\s*$//' )
+
     pkg_time_esecs=$( date --date="${pkg_time_date}" +%s )
 
     if (( "${pkg_time_esecs}" > \
 	release_threshold[${current_release_index}] )); then
+
 	prior_releases="${prior_releases} ${release_version[${current_release_index}]}"
 	current_release_index=$(( ${current_release_index} + 1 ))
     fi
-    # this actually reflects the next to-be-released pointrelease,
-    # horribly confusing, but should be clear if the logic is working...
+
+    # this represents the pointrelease to which present-iteration-time 
+    # maps to.  e.g. 2 if a new/prior current package bins to 6.2-base
+    # (if not subsequently obsoleted by a newer version/release of the 
+    #  same package before the next pointrelease temporal threshold is hit.
     cur_pkg_relver="${release_version[${current_release_index}]}"
 
     mkdir -p "${tmpdir}/chart_db/${pkg_n}"
-    # this will continually overwrite, which makes sense, i.e. if 2 updates
-    # were released after 6.0 was released but before 6.1 was released, then
-    # the lattermost is the base-version for 6.1
+
+    # this will continually overwrite, i.e. if 2 updates were released after
+    # 6.0 was released but before 6.1 was released, then the lattermost is the
+    # base-version for 6.1 
+    #
+    # BUGFIX/EDUNOTE: ... except when they're not.  As per the example of libvirt, 
+    #   libvirt-0.8.1-27.el6_0.6 was released(srpm build date) prior to the release
+    #   of the 6.1 release notes, but after libvirt-0.8.7-18 which clearly is the
+    #   the winner for the subsequent pointrelease compose.  HOWEVER, there are 
+    #   cases where an increment of 'release major*' or more happens, and 
+    #   should get sorted into an updates bin for a pointrelease.  For right now,
+    #   the logic will be such that by default the assumption is all such updates
+    #   effectively go in all pointrelease updates repos.  But a user toggle 
+    #   option will be implemented to allow a behavior of by default holding all
+    #   such* updates until they are manually whitelisted.  Call it update-policy
+    #   with values of conservative and liberal.  And if experience shows that
+    #   there is a consensus whitelist worth maintaining in tree, that can be a 3rd
+    #   convenient initial option.  OR, if I'm still not grokking all the relevant
+    #   facets of the equation, please do comment.
+    #
+    #   'release major' is what I'm calling the portion of Release: up to the first
+    #   '.'.  I.e. 18 and 27 in the above libvirt NVRs.  (alternately, it may 
+    #   be that this should be changed to 'prior to to %dist' instead of 'prior 
+    #   to %dist up to the first .'
+    #  
     for (( i=${current_release_index} ; $i < ${num_releases} ; i=$(( $i + 1 )) )); do
 	# until further notice, this latest version is the base version for
 	# next pointrelease, and all subsequent
-	echo "${pkg_nvr}" > "${tmpdir}/chart_db/${pkg_n}/${release_version[${i}]}-base-version"
+
+	# but IFF it is actually newer in a sort/version way
+	touch "${tmpdir}/chart_db/${pkg_n}/${release_version[${i}]}-base-version"
+	current_base_version=$( < "${tmpdir}/chart_db/${pkg_n}/${release_version[${i}]}-base-version" )
+	echo -en "${pkg_nvr}\n${current_base_version}\n" \
+	    | sort --sort=version \
+	    | tail -1 \
+	    > "${tmpdir}/chart_db/${pkg_n}/${release_version[${i}]}-base-version"
     done
+
     for prior_release in ${prior_releases}; do
-	echo "${pkg_nvr}" >> "${tmpdir}/chart_db/${pkg_n}/${prior_release}-updates-versions"
+
+	if [ "${x_update_policy}" == "conservative" ]; then
+	    # add to updates if and only if it is a 'minor' update (see above)
+
+            # note: this is using the alternate 'release major' definition described above
+	    pkg_nvr_up_to_rel_maj=$( \
+		echo "${pkg_nvr}" \
+		| sed -e 's/\.el6.*$//' )
+
+	    if ( \
+		grep -q \
+		"${pkg_nvr_up_to_rel_maj}" \
+		"${tmpdir}/chart_db/${pkg_n}/${prior_release}-base-version" ); then
+
+		echo "${pkg_nvr}" \
+		    >> "${tmpdir}/chart_db/${pkg_n}/${prior_release}-updates-versions"
+	    fi
+
+	elif [ "${x_update_policy}" == "liberal" ]; then
+	    # add to updates no matter what
+	    echo "${pkg_nvr}" \
+		>> "${tmpdir}/chart_db/${pkg_n}/${prior_release}-updates-versions"
+
+	else
+
+	    die "unknown update policy: ${x_update_policy}" \
+		"(not liberal or conservative)"
+
+	fi
     done
     
 #    echo ""
@@ -248,12 +363,34 @@ while read line; do
 done < "${input}"
 
 
+#############################################################################
+# iteration over packages: now output the repo chart
+
 while read line; do
-    pkg_time_esecs=$( echo "${line}" | awk -F'|' '{print $1}' | sed -e 's/^\s*0*//' -e 's/\s*$//' )
-    pkg_nvr=$( echo "${line}" | awk -F'|' '{print $2}' | sed -e 's/^\s*//' -e 's/\s*$//' )
-    pkg_nv=$( echo "${pkg_nvr}" | sed -e 's/-[^-]*$//' )
-    pkg_n=$( echo "${pkg_nv}" | sed -e 's/-[^-]*$//' )
-    pkg_time_date=$( echo "${line}" | awk -F'|' '{print $3}' | sed -e 's/^\s*//' -e 's/\s*$//' )
+
+    debug "outputting: line: ${line} ..."
+
+    pkg_time_esecs=$( \
+	echo "${line}" \
+	| awk -F'|' '{print $1}' \
+	| sed -e 's/^\s*0*//' -e 's/\s*$//' )
+
+    pkg_nvr=$( \
+	echo "${line}" \
+	| awk -F'|' '{print $2}' | \
+	sed -e 's/^\s*//' -e 's/\s*$//' )
+
+    pkg_nv=$( \
+	echo "${pkg_nvr}" \
+	| sed -e 's/-[^-]*$//' )
+
+    pkg_n=$( echo "${pkg_nv}" \
+	| sed -e 's/-[^-]*$//' )
+
+    pkg_time_date=$( \
+	echo "${line}" \
+	| awk -F'|' '{print $3}' \
+	| sed -e 's/^\s*//' -e 's/\s*$//' )
 
     # fields to add:
     #  - list of pointrels for which pkg_nvr is a base version
@@ -291,4 +428,5 @@ while read line; do
 
 done < "${input}"
 
-
+#############################################################################
+#############################################################################
